@@ -37,7 +37,10 @@ err = manager.Shutdown(shutdownCtx)
 
 [example_test.go](example_test.go) is a compilable assembly example. Product
 routing, placement, durable ownership, secrets and control-plane transports
-belong to the host.
+belong to the host. Consumers implement their own control plane or supply desired
+state directly; a separate control-plane service is optional. See the
+[runtime assignment and lease contract](docs/assignment-lease-contract.md) for
+adapter responsibilities, clock handling and ownership guarantees.
 
 `Apply` validates and copies the entire snapshot before accepting it. Each
 assignment has its own ID, workload ID, kind, positive revision, driver,
