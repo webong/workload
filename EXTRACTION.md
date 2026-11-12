@@ -58,6 +58,11 @@ Local supervision requires Linux/macOS and the companion executable. Unsupported
 resource ceilings return errors. Existing Gateway labels are never auto-migrated.
 
 The regression suite uses actual local worker/supervisor subprocesses and private
-sockets, and stateful Docker/Kubernetes command fakes. Live Docker and Kubernetes
-validation is still needed before deployment. The module is published independently at `github.com/webong/workload`; it has
+sockets, plus stateful Docker/Kubernetes command fakes. Opt-in integration suites
+also run against a real Docker daemon and a disposable Kind Kubernetes cluster.
+They adapt Gateway’s Docker recovery tests and isolated Kind provisioning smoke
+without importing Gateway code or requiring Planner/PHP. Hosted CI runs these
+real-runtime suites separately from the Linux/macOS unit matrix. These cover the
+library lifecycle; product-specific Gateway deployment validation remains separate.
+The module is published independently at `github.com/webong/workload`; it has
 not been wired into Gateway.

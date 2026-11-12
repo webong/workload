@@ -156,6 +156,48 @@ pushes and pull requests and can also be started manually.
 Tests cover local recovery after worker exit with real subprocesses and sockets,
 process termination, revision/launch drift, atomic Pod UID deletion, lost creation
 responses, named endpoints, resource limits, lease renewal/expiry, concurrent
-snapshots, and bounded/retryable shutdown. Docker and Kubernetes tests use
-stateful command fakes; live daemon/cluster deployment validation remains separate.
+snapshots, and bounded/retryable shutdown. Fast driver tests use stateful command
+fakes; the separate integration jobs below exercise the real runtimes.
 See [EXTRACTION.md](EXTRACTION.md) for provenance and compatibility changes.
+
+
+### Real Docker and Kubernetes integration tests
+
+With a running Docker daemon:
+
+```sh
+scripts/integration-test.sh docker
+```
+
+With Docker, Kind and kubectl installed:
+
+```sh
+scripts/integration-test.sh kubernetes
+# Or run both suites sequentially:
+scripts/integration-test.sh all
+```
+
+The script builds a small, dependency-free HTTP fixture image for the Docker
+server's architecture. It selects the current Docker context unless
+`WORKLOAD_TEST_DOCKER_CONTEXT` is set. Kubernetes uses a uniquely named disposable
+Kind cluster and a private kubeconfig, never the current Kubernetes context.
+Only this invocation's fixture containers, network, image and cluster are removed.
+
+Both suites verify recovery without changing the fixture's random HTTP boot ID,
+configuration/revision replacement, actual resource limits, stale-handle safety,
+cleanup that preserves foreign-owned resources, and adoption after a hard-killed
+worker. The recovered worker then shuts down gracefully. Both named endpoints
+must reach the same process. Kubernetes uses real port-forward processes and the
+API server; worker recovery creates fresh forwarders to the surviving Pod.
+
+These cases were adapted from Gateway's Docker adoption/crash tests and isolated
+Kind provisioning smoke, using only workload's public Manager and Driver seams.
+No Planner, PHP application or Gateway checkout is needed to run them.
+
+Ordinary `go test ./...` skips these tests unless their runtime-specific opt-in
+flag (`WORKLOAD_TEST_DOCKER=1` or `WORKLOAD_TEST_KUBERNETES=1`) is set. Once enabled,
+missing configuration or runtime failures fail the tests; they do not silently
+skip. Use the script to supply the fixture image and isolated runtime settings.
+GitHub Actions runs each real-runtime suite in its own Ubuntu job alongside the
+Linux/macOS unit matrix. On failure, CI uploads scoped test/runtime logs for seven
+days; private kubeconfig credentials are not uploaded.
