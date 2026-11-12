@@ -208,3 +208,7 @@ skip. Use the script to supply the fixture image and isolated runtime settings.
 GitHub Actions runs each real-runtime suite in its own Ubuntu job alongside the
 Linux/macOS unit matrix. On failure, CI uploads scoped test/runtime logs for seven
 days; private kubeconfig credentials are not uploaded.
+
+## Complete application example
+
+See [the Go control-plane example](examples/control-plane/) for a runnable app with its own desired-state API, assignment leases, real local HTTP workers, and graceful shutdown.
