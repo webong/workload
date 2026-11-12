@@ -4,7 +4,11 @@
 
 Standalone Go lifecycle management for long-running processes, with local,
 Docker and Kubernetes drivers. No Gateway dependencies. Go 1.25+, standard library
-only. Module path: `github.com/webong/workload`. No tagged release yet.
+only. Module path: `github.com/webong/workload`.
+
+```sh
+go get github.com/webong/workload@v0.1.0
+```
 
 ## Host interface
 

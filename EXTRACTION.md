@@ -5,8 +5,8 @@ Original sources: `pkg/spinner/provision` and
 `mod/arranger/integration/provision.go`. The original MIT attribution is retained.
 No Gateway files or integration points have been changed.
 
-This is an independent module without a tagged release. Its contracts have intentionally
-changed while preparing the extraction; it is not a drop-in replacement.
+This is an independent module. Its contracts intentionally differ from Gateway’s
+original provisioning interfaces; it is not a drop-in replacement.
 
 ## Completed interface work
 
