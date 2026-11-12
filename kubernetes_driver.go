@@ -462,6 +462,16 @@ func (p *kubernetesProcess) get(ctx context.Context) (kubernetesPod, bool, error
 	return (&KubernetesDriver{config: KubernetesDriverConfig{KubectlBinary: p.binary, Namespace: p.namespace}, runner: p.runner}).get(ctx, p.name)
 }
 func (p *kubernetesProcess) watch() {
+	// A forwarder belongs to this handle, even after its Pod vanishes or changes
+	// identity. Release local helpers on every terminal observation; never leave
+	// them holding the host's output pipes open after the handle is retired.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), p.timeout())
+		defer cancel()
+		if err := p.stopForwards(ctx); err != nil {
+			p.setHealth(fmt.Errorf("stop port-forward: %w", err))
+		}
+	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -513,9 +523,17 @@ func (p *kubernetesProcess) Port() int             { return p.port }
 func (p *kubernetesProcess) Done() <-chan struct{} { return p.done }
 func (p *kubernetesProcess) Err() error            { p.errMu.RLock(); defer p.errMu.RUnlock(); return p.err }
 func (p *kubernetesProcess) Endpoints() []Endpoint { return append([]Endpoint(nil), p.endpoints...) }
-func (p *kubernetesProcess) Stop(ctx context.Context) error {
+func (p *kubernetesProcess) Stop(ctx context.Context) (result error) {
 	p.stopMu.Lock()
 	defer p.stopMu.Unlock()
+	// API failures and UID conflicts do not transfer ownership of this handle's
+	// local helpers. Stop those even when remote termination is unconfirmed.
+	defer func() {
+		result = errors.Join(result, p.stopForwards(ctx))
+		if result == nil {
+			p.finish(nil)
+		}
+	}()
 	if p.uid == "" {
 		return fmt.Errorf("cannot stop pod without a UID")
 	}
@@ -552,17 +570,17 @@ func (p *kubernetesProcess) Stop(ctx context.Context) error {
 			}
 		}
 	}
-	var errs []error
+	return nil
+}
+
+func (p *kubernetesProcess) stopForwards(ctx context.Context) error {
+	var failures []error
 	for _, forward := range p.forwards {
 		if err := forward.Stop(ctx); err != nil {
-			errs = append(errs, err)
+			failures = append(failures, err)
 		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	p.finish(nil)
-	return nil
+	return errors.Join(failures...)
 }
 
 var _ Driver = (*KubernetesDriver)(nil)
