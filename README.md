@@ -1,5 +1,7 @@
 # workload
 
+[![CI](https://github.com/webong/workload/actions/workflows/ci.yml/badge.svg)](https://github.com/webong/workload/actions/workflows/ci.yml)
+
 Standalone Go lifecycle management for long-running processes, with local,
 Docker and Kubernetes drivers. No Gateway dependencies. Go 1.25+, standard library
 only. Module path: `github.com/webong/workload`. No tagged release yet.
@@ -146,6 +148,10 @@ concurrent lifecycle calls. `ControlPlane.Report` can run concurrently at shutdo
 go test -race ./...
 go vet ./...
 ```
+
+GitHub Actions runs formatting, vet, builds and uncached race tests on Linux and
+macOS, using both Go 1.25 and the latest stable Go release. The workflow runs on
+pushes and pull requests and can also be started manually.
 
 Tests cover local recovery after worker exit with real subprocesses and sockets,
 process termination, revision/launch drift, atomic Pod UID deletion, lost creation
