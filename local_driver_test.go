@@ -5,6 +5,7 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -176,5 +177,144 @@ func TestLocalOrphanJournalBlocksRelaunch(t *testing.T) {
 	}
 	if err := ServeLocalSupervisor(dir, key, time.Second); err == nil || !strings.Contains(err.Error(), "orphaned") {
 		t.Fatalf("orphaned journal permitted duplicate: %v", err)
+	}
+}
+
+// Exercise replacement through the driver when the supervisor persists its stop
+// receipt but the RPC reply is lost. A missing socket alone cannot prove exit.
+func TestLocalReplacementRecoversLostStopReply(t *testing.T) {
+	for _, lostReply := range []bool{false, true} {
+		name := "socket already closed"
+		if lostReply {
+			name = "stop reply lost"
+		}
+		t.Run(name, func(t *testing.T) { testLocalReplacementReceipt(t, lostReply) })
+	}
+}
+
+func testLocalReplacementReceipt(t *testing.T, lostReply bool) {
+	t.Helper()
+	t.Setenv("TMPDIR", "/tmp")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := LocalDriverConfig{NodeID: "node", StateDirectory: dir, SupervisorBinary: buildSupervisor(t), StartTimeout: 5 * time.Second, StopTimeout: 2 * time.Second}
+	driver, err := NewLocalDriver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := validSpec()
+	spec.AssignmentID = "lost-replacement-reply"
+	key := identityKey(config.NodeID, spec.TargetID, spec.AssignmentID)
+	socket, err := localSocketPath(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	recordPath := filepath.Join(dir, key+".json")
+	record := localRecord{NodeID: config.NodeID, AssignmentID: spec.AssignmentID, Socket: socket, Fingerprint: "original-launch"}
+	if err := writeLocalRecord(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				served <- err
+				return
+			}
+			var request localRequest
+			err = json.NewDecoder(conn).Decode(&request)
+			if err == nil && request.Action == "status" {
+				if !lostReply {
+					// Retire the listener before returning its last status so the
+					// subsequent Stop deterministically finds no socket.
+					record.Done = true
+					err = writeLocalRecord(recordPath, record)
+					listener.Close()
+				}
+				if err == nil {
+					err = json.NewEncoder(conn).Encode(localResponse{Started: true, Fingerprint: record.Fingerprint})
+				}
+				conn.Close()
+				if err != nil || !lostReply {
+					served <- err
+					return
+				}
+				continue
+			}
+			if err == nil && request.Action != "stop" {
+				err = fmt.Errorf("unexpected action %q", request.Action)
+			}
+			if err == nil && request.Fingerprint != record.Fingerprint {
+				err = fmt.Errorf("stop did not identify the old launch: %q", request.Fingerprint)
+			}
+			if err == nil {
+				record.Done = true
+				err = writeLocalRecord(recordPath, record)
+			}
+			// Close both the socket and connection without delivering the reply.
+			listener.Close()
+			conn.Close()
+			served <- err
+			return
+		}
+	}()
+	process, startErr := driver.Start(t.Context(), spec, &localDefinition{directory: dir})
+	if process != nil {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := process.Stop(ctx); err != nil {
+				t.Errorf("cleanup: %v", err)
+			}
+		})
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+	if startErr != nil {
+		t.Fatalf("replace after confirmed shutdown with lost reply: %v", startErr)
+	}
+}
+
+func TestLocalStopRequiresMatchingTerminalReceipt(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		record    localRecord
+		confirmed bool
+	}{
+		{"matching", localRecord{Fingerprint: "expected", Done: true}, true},
+		{"different launch", localRecord{Fingerprint: "newer", Done: true}, false},
+		{"not terminated", localRecord{Fingerprint: "expected"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "receipt.json")
+			if err := writeLocalRecord(path, test.record); err != nil {
+				t.Fatal(err)
+			}
+			process := &supervisedProcess{socket: filepath.Join(dir, "absent.sock"), recordPath: path, fingerprint: "expected", timeout: time.Second, done: make(chan struct{})}
+			err := process.Stop(t.Context())
+			if (err == nil) != test.confirmed {
+				t.Fatalf("confirmed=%v: %v", test.confirmed, err)
+			}
+			select {
+			case <-process.Done():
+				if !test.confirmed {
+					t.Fatal("unconfirmed process marked done")
+				}
+			default:
+				if test.confirmed {
+					t.Fatal("confirmed process not marked done")
+				}
+			}
+		})
 	}
 }

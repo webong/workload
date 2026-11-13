@@ -101,7 +101,10 @@ func (d *LocalDriver) Start(ctx context.Context, s Spec, definition Definition) 
 		}
 	}
 	if status.Started && status.Fingerprint != fingerprint {
-		p := &supervisedProcess{socket: socket, recordPath: filepath.Join(d.config.StateDirectory, key+".json"), timeout: d.config.StopTimeout, done: make(chan struct{})}
+		// Preserve the observed launch identity: the stop reply can be lost as
+		// the old supervisor closes its socket. Only its matching durable receipt
+		// may confirm termination, and the stop must not target a newer launch.
+		p := &supervisedProcess{socket: socket, recordPath: filepath.Join(d.config.StateDirectory, key+".json"), fingerprint: status.Fingerprint, timeout: d.config.StopTimeout, done: make(chan struct{})}
 		if err = p.Stop(ctx); err != nil {
 			return p, fmt.Errorf("replace local process: %w", err)
 		}
