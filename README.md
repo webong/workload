@@ -2,213 +2,177 @@
 
 [![CI](https://github.com/webong/workload/actions/workflows/ci.yml/badge.svg)](https://github.com/webong/workload/actions/workflows/ci.yml)
 
-Standalone Go lifecycle management for long-running processes, with local,
-Docker and Kubernetes drivers. No Gateway dependencies. Go 1.25+, standard library
-only. Module path: `github.com/webong/workload`.
+Run and manage long-running processes from your Go application, locally, in Docker,
+or on Kubernetes. Workload starts them, waits for them to be ready, restarts them
+if they exit, and stops them when your app no longer needs them.
+
+Your app decides what should run and where. Workload handles running it.
+
+Requires Go 1.25 or newer. The Go module uses only the standard library.
 
 ```sh
-go get github.com/webong/workload@v0.1.0
+go get github.com/webong/workload@v0.2.1
 ```
 
-## Host interface
+## Try a complete app
+
+The [Go example](examples/control-plane/) runs real HTTP worker processes and gives
+you an API to create, update, scale, and stop them. It runs on Linux and macOS
+without Docker or Kubernetes.
+
+From a checkout of this repository:
+
+```sh
+mkdir -p bin
+go build -o bin/workload-supervisor ./cmd/workload-supervisor
+go build -o bin/control-plane ./examples/control-plane
+./bin/control-plane -supervisor ./bin/workload-supervisor
+```
+
+In another terminal, start two workers:
+
+```sh
+curl -fsS -X PUT http://127.0.0.1:8080/workloads/hello \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Hello from workload","replicas":2}'
+
+curl -fsS http://127.0.0.1:8080/instances
+```
+
+Creation happens in the background. Check `/instances` until both workers have
+`ready: true`, then open one of their endpoint URLs. Press Ctrl-C in the app's
+terminal to stop the app and its workers.
+
+The example keeps its settings in memory and listens only on your computer. Its
+[walkthrough](examples/control-plane/README.md) also covers changing messages,
+scaling, expired permissions, and shutdown.
+
+## Use workload in your app
+
+You provide three things:
+
+- A **definition** that turns your app's settings into a command or container to run.
+- A **driver** that runs it locally, in Docker, or on Kubernetes.
+- **Assignments** describing each instance you want to run, with its ID, settings,
+  version, and permission deadline.
+
+A `Manager` connects these pieces. After configuring it, the main calls are:
 
 ```go
-manager, err := workload.NewManager(workload.Options{
-    NodeID:       "worker-a",
-    Definitions: definitions,
-    Drivers:     drivers,
-    PollInterval: time.Second,
-    StartTimeout: 10 * time.Second,
-    StopTimeout:  5 * time.Second,
-})
-
-// Fetch a complete snapshot from your authoritative control plane.
+// Supply the complete list of instances you want to run.
 err = manager.Apply(ctx, workload.Snapshot{Assignments: assignments})
 
-// Run once in the host's lifecycle group.
+// Run the manager until its context is cancelled. Check the returned error.
 err = manager.Run(ctx)
 
-// Safe concurrently with Run; returns copied observations and named endpoints.
+// From another goroutine, check each instance's state and ready endpoints.
 observations := manager.Status()
-
-// Cancel, stop within a total budget, and confirm cleanup. Retry on failure.
-err = manager.Shutdown(shutdownCtx)
 ```
 
-[example_test.go](example_test.go) is a compilable assembly example. Product
-routing, placement, durable ownership, secrets and control-plane transports
-belong to the host. Consumers implement their own control plane or supply desired
-state directly; a separate control-plane service is optional. See the
-[runtime assignment and lease contract](docs/assignment-lease-contract.md) for
-adapter responsibilities, clock handling and ownership guarantees.
+These calls show the flow; [example_test.go](example_test.go) shows how to configure
+and connect the pieces. You can call `Apply` and `Status` while `Run` is active.
 
-`Apply` validates and copies the entire snapshot before accepting it. Each
-assignment has its own ID, workload ID, kind, positive revision, driver,
-configuration and future `LeaseUntil`. One assignment represents one instance;
-the host expands replicas. An empty snapshot stops all assignments. An error
-fetching desired state must not be converted into an empty snapshot.
+Each assignment describes one running instance. To request three copies, provide
+three assignments with different IDs. Keep an instance's ID stable across updates.
+Change its revision or settings when you want workload to replace it.
 
-Acceptance is asynchronous: `Apply` wakes reconciliation; `Status` reports
-`starting`, `running`, `stopping`, `stopped`, `failed`, `unhealthy` or
-`stop-failed`. Only `running` observations advertise ready endpoints. Renewing a
-lease does not restart the process. Expired assignments cannot restart from an
-old snapshot; the run loop wakes for lease expiry independently of polling.
-Status retains the latest observation per assignment, including terminal states.
+`Apply` accepts the full list, rather than a set of changes. Leaving an instance
+out requests that it stop; an empty list requests that everything stop. If your
+app fails to fetch its settings, keep the previous list and its existing deadlines
+instead of sending an empty list.
 
-A definition implements:
+Workload is for long-running servers and workers. It restarts an assigned process
+even if that process exits successfully. It is not a queue for one-time jobs.
 
-```go
-type Definition interface {
-    Type() string
-    Supports(driver string) bool
-    Validate(context.Context, Spec) error
-    Prepare(context.Context, Spec, Placement) (LaunchSpec, error)
-}
-```
+## Choose how to run processes
 
-Preparation is deterministic and has no process/listener side effects. Placement
-contains the driver, bind host and reusable named local ports. Local definitions
-must reuse those ports when recovering. `LaunchSpec.Endpoints` describes named
-TCP listeners; all must accept connections before readiness. No endpoints means
-readiness after creation, suitable for foreground background workers.
-`LaunchSpec.Port` remains shorthand for one endpoint named `default`; it cannot
-be combined with named endpoints. These are long-running workloads: an exited
-process is restarted while its assignment is running, including exit status zero.
-This is not a durable one-shot job queue.
+| Driver | What you need |
+| --- | --- |
+| Local | Linux or macOS, the companion supervisor binary, and a private state directory |
+| Docker | Access to a Docker daemon |
+| Kubernetes | Access to a Kubernetes cluster |
 
-`ResourceLimits` describes memory bytes, CPU millicores and PID count. Docker
-enforces all three; Kubernetes enforces memory and CPU and rejects PID limits.
-Local execution rejects resource limits rather than ignoring them. Custom driver
-names are allowed; capabilities are validated against the configured registry.
+For local execution, build the supervisor as shown above. Set
+`LocalDriverConfig.SupervisorBinary` to its absolute path and `StateDirectory` to
+an absolute directory owned by the app's user, with permissions `0700`. Keep this
+directory between app restarts: it lets a new app process reconnect to workers
+that are already running. Workers must run in the foreground and keep their child
+processes in the same process group.
 
-## Recovery and ownership
+Definitions can describe multiple named TCP endpoints. Workload waits for all of
+them to accept connections before reporting the instance as ready. A worker with
+no endpoints is considered ready after it starts. When recovering a local process,
+reuse the ports supplied to your definition's `Prepare` method.
 
-Docker and Kubernetes use names scoped to exact node/target/assignment identities
-and hashed label values. Case, punctuation and long identities do not collapse to
-the same sanitized name. SHA-256-derived fingerprints cover assignment/workload
-identity, revision, configuration, launch settings and driver configuration.
-Matching resources are adopted. Owned stale resources are stopped and removed
-before replacement; foreign resources are rejected. Docker also checks observed
-command, explicit environment, directory and requested limits. Kubernetes checks
-managed Pod fields and accepts equivalent canonical resource quantities.
+You can request memory, CPU, and process-count limits. Docker supports all three;
+Kubernetes supports memory and CPU. The local driver does not support these limits.
+Unsupported requests return an error rather than being silently ignored.
 
-Docker environment-file contents participate in the fingerprint. Treat files
-and referenced Kubernetes secrets/config maps as immutable during a launch;
-bump the revision when changing external configuration. Pin image digests when
-image content must be stable across nodes and restarts.
+## Keep control in your app
 
-Kubernetes deletion uses a server-side UID precondition and waits for disappearance
-of that identity. API failures and deletion acceptance alone do not prove
-termination. Docker operations use immutable container IDs after discovery.
-Creation/readiness failures retain cleanup handles whenever the runtime outcome
-is uncertain. Recovery failures reach `Run` and `Shutdown`, even without logging.
+You do not need a separate scheduling service. Your app can load settings from a
+file, a database, or an API and pass them to `Manager.Apply`.
 
-Local execution uses a separate companion supervisor on Linux and macOS:
+If you prefer workload to poll your service, implement `ControlPlane` and use
+`NewReconciler`. The [Go example](examples/control-plane/) demonstrates this approach.
+Your app still owns storage, authentication, choosing machines, and deciding which
+app process is allowed to manage each instance.
 
-```sh
-go build -o ./bin/workload-supervisor ./cmd/workload-supervisor
-```
+Every assignment passed to `Manager.Apply` needs a future `LeaseUntil`: the time
+until which it has permission to run. Renew that permission by supplying a new
+list with later deadlines. Renewal alone does not restart a worker. If permission
+expires, the running manager stops the worker and removes its ready endpoints.
 
-Configure `LocalDriverConfig.NodeID`, an absolute `SupervisorBinary`, and a durable
-`StateDirectory` owned by the worker user with permissions `0700`. The supervisor
-owns a process group, holds an exclusive assignment lock, and exposes a private
-Unix socket. A replacement worker reconnects to it, verifies the fingerprint and
-reuses its ports. Workloads must stay in the foreground and keep descendants in
-the process group. Shutdown sends TERM, escalates to KILL and reaps the child.
-A durable terminal receipt allows shutdown confirmation after a lost RPC reply.
+On restart, workload reconnects to matching processes or containers instead of
+starting duplicates. It checks their identity and launch settings before reusing
+them. Change the revision when changing referenced secrets or other external
+configuration, and pin container image digests when you need a fixed image version.
 
-If the supervisor itself crashes, an unfinished journal blocks automatic relaunch.
-The caller must verify termination before removing that journal. The library never
-signals a numeric PID from a stale file. This deliberately preserves uncertainty
-instead of risking duplicate execution or signaling a reused PID.
+Your app must ensure that two controllers cannot manage the same instance at once.
+An expired lease or a lost connection does not prove that a remote worker has
+stopped. Confirm termination, or prevent the old worker from acting, before moving
+its work to another machine. For local execution, a supervisor crash blocks
+automatic relaunch until you verify that its old workers have stopped. Do not
+delete its state files just to force a restart.
 
-The host must establish exclusive durable worker ownership before running the
-manager or invoking cleanup. Leases are enforced by the live manager; they do not
-provide an external crash watchdog or cross-node fencing. Keep that authority in
-your durable control plane. Labels intentionally differ from Gateway's, so this
-module does not adopt or migrate existing Gateway resources.
+## Shut down cleanly
 
-## Shutdown contract
+Cancel the context passed to `Run`, then check its returned error. You can also call
+`manager.Shutdown(ctx)` directly. It uses the configured stop timeout and your
+context's deadline to limit how long cleanup can take.
 
-`Run` is single-use. Cancellation triggers shutdown and returns joined errors
-identifying unresolved assignments. `Shutdown` is terminal, safe concurrently
-with `Run`, and retryable after failure. It uses the earlier of its caller deadline
-and configured `StopTimeout` across waiting, stopping and recovery cleanup, with
-at most eight concurrent instance stops. Failed stops retain ownership and
-withdraw readiness; they cannot trigger a duplicate replacement.
+If shutdown fails, retain ownership and retry `Shutdown`. Workload keeps track of
+instances whose cleanup is incomplete and does not replace them while their
+termination is uncertain. A manager cannot be restarted after shutdown; create a
+new one for a new run.
 
-A custom driver's `Start` may return both a handle and an error when creation
-succeeded but readiness/cleanup is uncertain. Returning no handle promises no
-owned workload was left behind. `Process.Done` describes observed exit;
-`Process.Stop` must also confirm resource cleanup, honor cancellation and allow
-retries. Custom definitions, drivers and control-plane transports must honor
-their contexts; Go cannot forcibly interrupt arbitrary blocking implementations.
+For the full API rules, including custom drivers and distributed operation, see
+the [assignment and lease contract](docs/assignment-lease-contract.md).
 
-The lower-level `Reconciler` accepts a `ControlPlane` and serialized named-endpoint
-callbacks for hosts that prefer polling integration. It also supports the original
-node-refresh lease ceiling. Prefer `Manager` for explicit leased snapshots and
-concurrent lifecycle calls. `ControlPlane.Report` can run concurrently at shutdown.
-
-## Validation
+## Run the tests
 
 ```sh
 go test -race ./...
 go vet ./...
 ```
 
-GitHub Actions runs formatting, vet, builds and uncached race tests on Linux and
-macOS, using both Go 1.25 and the latest stable Go release. The workflow runs on
-pushes and pull requests and can also be started manually.
+CI runs builds, formatting checks, vet, and race tests on Linux and macOS with
+Go 1.25 and the latest stable Go version. It also tests against real Docker and
+Kubernetes environments.
 
-Tests cover local recovery after worker exit with real subprocesses and sockets,
-process termination, revision/launch drift, atomic Pod UID deletion, lost creation
-responses, named endpoints, resource limits, lease renewal/expiry, concurrent
-snapshots, and bounded/retryable shutdown. Fast driver tests use stateful command
-fakes; the separate integration jobs below exercise the real runtimes.
-See [EXTRACTION.md](EXTRACTION.md) for provenance and compatibility changes.
-
-
-### Real Docker and Kubernetes integration tests
-
-With a running Docker daemon:
+To run those integration tests locally, start Docker, then use:
 
 ```sh
 scripts/integration-test.sh docker
-```
 
-With Docker, Kind and kubectl installed:
-
-```sh
+# Also requires Kind and kubectl:
 scripts/integration-test.sh kubernetes
-# Or run both suites sequentially:
+
+# Run both:
 scripts/integration-test.sh all
 ```
 
-The script builds a small, dependency-free HTTP fixture image for the Docker
-server's architecture. It selects the current Docker context unless
-`WORKLOAD_TEST_DOCKER_CONTEXT` is set. Kubernetes uses a uniquely named disposable
-Kind cluster and a private kubeconfig, never the current Kubernetes context.
-Only this invocation's fixture containers, network, image and cluster are removed.
-
-Both suites verify recovery without changing the fixture's random HTTP boot ID,
-configuration/revision replacement, actual resource limits, stale-handle safety,
-cleanup that preserves foreign-owned resources, and adoption after a hard-killed
-worker. The recovered worker then shuts down gracefully. Both named endpoints
-must reach the same process. Kubernetes uses real port-forward processes and the
-API server; worker recovery creates fresh forwarders to the surviving Pod.
-
-These cases were adapted from Gateway's Docker adoption/crash tests and isolated
-Kind provisioning smoke, using only workload's public Manager and Driver seams.
-No Planner, PHP application or Gateway checkout is needed to run them.
-
-Ordinary `go test ./...` skips these tests unless their runtime-specific opt-in
-flag (`WORKLOAD_TEST_DOCKER=1` or `WORKLOAD_TEST_KUBERNETES=1`) is set. Once enabled,
-missing configuration or runtime failures fail the tests; they do not silently
-skip. Use the script to supply the fixture image and isolated runtime settings.
-GitHub Actions runs each real-runtime suite in its own Ubuntu job alongside the
-Linux/macOS unit matrix. On failure, CI uploads scoped test/runtime logs for seven
-days; private kubeconfig credentials are not uploaded.
-
-## Complete application example
-
-See [the Go control-plane example](examples/control-plane/) for a runnable app with its own desired-state API, assignment leases, real local HTTP workers, and graceful shutdown.
+The scripts build their test image and clean up the resources they create.
+Kubernetes tests use a separate, temporary Kind cluster rather than your current
+Kubernetes context. Docker tests use your current Docker context unless you set
+`WORKLOAD_TEST_DOCKER_CONTEXT`.
